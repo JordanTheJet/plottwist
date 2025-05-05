@@ -3,6 +3,7 @@ import asyncio
 import json
 import re
 import os
+import time
 from typing import Dict, List, Any
 from openai import AsyncOpenAI  # For OpenAI models
 
@@ -14,47 +15,68 @@ except ImportError:
     GEMINI_AVAILABLE = False
     print("Google Generative AI package not available. To install: pip install google-generativeai")
 
+# Enhanced logging for Gemini operations
+def log_gemini(message, level="INFO"):
+    """Log Gemini-related operations with timestamp and log level"""
+    debug_mode = os.environ.get("DEBUG", "False").lower() in ("true", "1", "t")
+    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    # Always print logs regardless of level
+    print(f"[GEMINI][{timestamp}][{level}] {message}")
+
 async def analyze_book(book_content: dict) -> dict:
     """
     Analyze the book content using AI to extract characters, settings, and plot
     Returns structured book data
     """
-    # Try Gemini first if available, then fall back to OpenAI
-    if GEMINI_AVAILABLE and os.environ.get("GEMINI_API_KEY"):
+    # Only use Gemini - no fallback to OpenAI
+    if GEMINI_AVAILABLE and os.environ.get("GOOGLE_API_KEY"):
         try:
+            log_gemini("Using Gemini for book analysis...", "INFO")
             return await analyze_with_gemini(book_content)
         except Exception as e:
-            print(f"Gemini analysis failed: {str(e)}. Falling back to OpenAI.")
-            return await analyze_with_openai(book_content)
+            log_gemini(f"Gemini analysis failed: {str(e)}", "ERROR")
+            # Return placeholder instead of falling back to OpenAI
+            return await placeholder_analysis(book_content)
     else:
-        return await analyze_with_openai(book_content)
+        if not GEMINI_AVAILABLE:
+            log_gemini("Gemini package not available. Please install google-generativeai", "ERROR")
+        else:
+            log_gemini("GOOGLE_API_KEY not found in environment variables", "ERROR")
+        return await placeholder_analysis(book_content)
 
 async def analyze_with_gemini(book_content: dict) -> dict:
     """
     Use Google's Gemini for deep contextual analysis of the book
     """
-    api_key = os.environ.get("GEMINI_API_KEY")
+    api_key = os.environ.get("GOOGLE_API_KEY")
     if not api_key:
-        raise ValueError("GEMINI_API_KEY environment variable not set")
-    
+        log_gemini("GOOGLE_API_KEY environment variable not set", "ERROR")
+        raise ValueError("GOOGLE_API_KEY environment variable not set")
+
     # Configure Gemini
+    log_gemini(f"Configuring Gemini with API key: {api_key[:4]}...{api_key[-4:]}")
     genai.configure(api_key=api_key)
-    
+
     # Extract text from the book content
+    log_gemini("Extracting text from book content...")
     book_text = ""
     for page in book_content["content"]:
         book_text += page["content"] + "\n\n"
-    
+
     # For large books, take strategic samples
     sample_text = book_text
     if len(book_text) > 30000:  # Gemini can handle more context
+        log_gemini(f"Book is large ({len(book_text)} chars), taking strategic samples")
         first_part = book_text[:8000]
         middle_part = book_text[len(book_text)//2-4000:len(book_text)//2+4000]
         last_part = book_text[-8000:]
         sample_text = f"{first_part}\n\n[...]\n\n{middle_part}\n\n[...]\n\n{last_part}"
-    
-    print(f"Analyzing book with Gemini: {len(sample_text)} characters of text")
-    
+        log_gemini(f"Created sample of {len(sample_text)} characters")
+    else:
+        log_gemini(f"Using full book text ({len(book_text)} characters)")
+
+    log_gemini(f"Analyzing book with Gemini: {len(sample_text)} characters of text", "INFO")
+
     # Create prompt for Gemini
     prompt = f"""
     You are a literary analyst with expertise in deep narrative analysis. Your task is to thoroughly analyze this book excerpt and create a comprehensive breakdown suitable for adaptation into an interactive visual novel.
@@ -63,12 +85,12 @@ async def analyze_with_gemini(book_content: dict) -> dict:
     Title: {book_content["metadata"].get("title", "Unknown")}
     Author: {book_content["metadata"].get("author", "Unknown")}
     Pages: {book_content["metadata"].get("pages", 0)}
-    
+
     BOOK EXCERPT:
     {sample_text}
-    
+
     IMPORTANT: Extract the following elements with deep detail:
-    
+
     1. CHARACTERS: For each major character (at least 5):
        - Name and role in the story
        - Detailed physical description
@@ -77,13 +99,13 @@ async def analyze_with_gemini(book_content: dict) -> dict:
        - Motivations and desires
        - Relationships with other characters
        - Arc throughout the story
-    
+
     2. SETTINGS: For each important location (at least 3):
        - Name and physical description
        - Atmosphere and mood
        - Significance to the plot
        - Cultural or historical context
-    
+
     3. PLOT ANALYSIS:
        - Detailed summary capturing the essence of the story
        - Clear identification of the central conflict
@@ -92,9 +114,9 @@ async def analyze_with_gemini(book_content: dict) -> dict:
        - Major themes and motifs
        - Significant symbols or objects
        - Tone and atmosphere
-    
+
     FORMAT YOUR RESPONSE AS A JSON OBJECT with this exact structure:
-    
+
     {{
     "characters": [
         {{
@@ -138,37 +160,83 @@ async def analyze_with_gemini(book_content: dict) -> dict:
     "symbols": ["symbol1", "symbol2", "etc."],
     "tone": "Overall tone of the story"
     }}
-    
+
     Focus on providing DEEP, RICH DETAILS for each element. No generalities or placeholders.
     """
-    
-    # Create a Gemini model instance with thinking capabilities
-    model = genai.GenerativeModel('gemini-2.0-flash-thinking-exp-01-21')
-    
+
+    # Create a Gemini model instance
+    model_name = "gemini-1.5-pro"  # Preferred model
+    try:
+        # Try to use Gemini 1.5 Pro first
+        log_gemini(f"Initializing Gemini model: {model_name}")
+        model = genai.GenerativeModel(model_name)
+    except Exception as e:
+        log_gemini(f"Error using {model_name}: {str(e)}", "WARNING")
+        # Fall back to Gemini Pro if 1.5 is not available
+        model_name = "gemini-pro"
+        log_gemini(f"Falling back to {model_name}", "WARNING")
+        model = genai.GenerativeModel(model_name)
+
     # Generate content with the model
-    response = model.generate_content(prompt)
-    
+    log_gemini(f"Generating content with {model_name}...")
+    start_time = time.time()
+
+    try:
+        response = model.generate_content(prompt)
+        generation_time = time.time() - start_time
+        log_gemini(f"Content generation completed in {generation_time:.2f} seconds", "INFO")
+    except Exception as e:
+        log_gemini(f"Error during content generation: {str(e)}", "ERROR")
+        raise e
+
     # Process the response
     try:
+        # Check if we have a valid response
+        if not hasattr(response, 'text'):
+            log_gemini("No text in response from Gemini", "ERROR")
+            raise ValueError("Empty response from Gemini")
+
         # Extract the JSON part from the response
         analysis_text = response.text
-        
+        log_gemini(f"Received response of {len(analysis_text)} characters")
+
         # Look for JSON content within the response
         json_match = re.search(r'```json\s*(.*?)\s*```', analysis_text, re.DOTALL)
         if json_match:
+            log_gemini("Found JSON code block in response")
             analysis_text = json_match.group(1)
-        
+        else:
+            log_gemini("No JSON code block found, using raw response", "WARNING")
+
         # Try to parse as JSON
+        log_gemini("Parsing response as JSON...")
         analysis_data = json.loads(analysis_text)
-        
+        log_gemini("Successfully parsed JSON response")
+
         # Validate and clean up the analysis data
+        log_gemini("Validating and cleaning up analysis data...")
         analysis_data = validate_analysis_data(analysis_data, book_content)
+        log_gemini("Book analysis complete", "INFO")
         return analysis_data
-        
+
+    except json.JSONDecodeError as e:
+        log_gemini(f"JSON parsing error: {str(e)}", "ERROR")
+        log_gemini("Attempting to repair JSON...")
+        try:
+            fixed_text = attempt_json_repair(analysis_text)
+            analysis_data = json.loads(fixed_text)
+            log_gemini("Successfully repaired and parsed JSON", "INFO")
+            analysis_data = validate_analysis_data(analysis_data, book_content)
+            return analysis_data
+        except Exception as repair_error:
+            log_gemini(f"JSON repair failed: {str(repair_error)}", "ERROR")
+            # Print the first 200 characters of the response for debugging
+            log_gemini(f"Response preview: {response.text[:200]}...", "ERROR")
+            raise e
     except Exception as e:
-        print(f"Error processing Gemini response: {str(e)}")
+        log_gemini(f"Error processing Gemini response: {str(e)}", "ERROR")
         # Print the first 200 characters of the response for debugging
-        print(f"Response preview: {response.text[:200]}...")
+        log_gemini(f"Response preview: {response.text[:200]}...", "ERROR")
         raise e
 
 async def analyze_with_openai(book_content: dict) -> dict:
@@ -179,12 +247,12 @@ async def analyze_with_openai(book_content: dict) -> dict:
         # Initialize OpenAI client
         api_key = os.environ.get("OPENAI_API_KEY", "your-openai-api-key")
         client = AsyncOpenAI(api_key=api_key)
-        
+
         # Extract text from the book content
         book_text = ""
         for page in book_content["content"]:
             book_text += page["content"] + "\n\n"
-        
+
         # Better text sampling for large books
         sample_text = book_text
         if len(book_text) > 12000:
@@ -194,9 +262,9 @@ async def analyze_with_openai(book_content: dict) -> dict:
             middle_part2 = book_text[2*len(book_text)//3:2*len(book_text)//3 + 3000]
             last_part = book_text[-3000:]
             sample_text = f"{first_part}\n\n[...]\n\n{middle_part1}\n\n[...]\n\n{middle_part2}\n\n[...]\n\n{last_part}"
-        
+
         print(f"Analyzing book with OpenAI: {len(sample_text)} characters of text")
-        
+
         # Create a comprehensive prompt for literary analysis
         prompt = f"""
         You are a literary analyst with expertise in deep narrative analysis. Analyze this book excerpt and create a detailed breakdown suitable for adaptation into an interactive visual novel.
@@ -205,12 +273,12 @@ async def analyze_with_openai(book_content: dict) -> dict:
         Title: {book_content["metadata"].get("title", "Unknown")}
         Author: {book_content["metadata"].get("author", "Unknown")}
         Pages: {book_content["metadata"].get("pages", 0)}
-        
+
         BOOK EXCERPT:
         {sample_text}
-        
+
         IMPORTANT: Extract the following elements with deep detail:
-        
+
         1. CHARACTERS: For each major character (at least 5 if present):
            - Name and role in the story
            - Physical description
@@ -218,12 +286,12 @@ async def analyze_with_openai(book_content: dict) -> dict:
            - Speech patterns and expressions
            - Motivations and desires
            - Relationships with other characters
-        
+
         2. SETTINGS: For each important location (at least 3):
            - Name and physical description
            - Atmosphere and mood
            - Significance to the plot
-        
+
         3. PLOT ANALYSIS:
            - Detailed summary capturing the essence of the story
            - Central conflict
@@ -231,9 +299,9 @@ async def analyze_with_openai(book_content: dict) -> dict:
            - Potential branching points for an interactive story
            - Major themes and motifs
            - Tone and atmosphere
-        
+
         FORMAT YOUR RESPONSE AS A JSON OBJECT using this structure:
-        
+
         {{
           "characters": [
             {{
@@ -275,10 +343,10 @@ async def analyze_with_openai(book_content: dict) -> dict:
           "themes": ["theme1", "theme2", "etc."],
           "tone": "Overall tone of the story"
         }}
-        
+
         Provide DEEP, RICH DETAILS for each element. No generalities or placeholders.
         """
-        
+
         # Make the API call to OpenAI with increased token limits
         response = await client.chat.completions.create(
             model="gpt-4-turbo",  # Using the most capable model for analysis
@@ -291,22 +359,22 @@ async def analyze_with_openai(book_content: dict) -> dict:
             max_tokens=3500,  # Increased to ensure complete response
             timeout=90  # Extended timeout for longer processing
         )
-        
+
         # Parse the response with better error handling
         analysis_text = response.choices[0].message.content
-        
+
         try:
             print(f"Received analysis from OpenAI ({len(analysis_text)} chars)")
             analysis_data = json.loads(analysis_text)
-            
+
             # Validate and clean up the analysis data
             analysis_data = validate_analysis_data(analysis_data, book_content)
             return analysis_data
-            
+
         except json.JSONDecodeError as e:
             print(f"JSON parsing error at position {e.pos}: {e.msg}")
             print(f"Response snippet near error: '{analysis_text[max(0, e.pos-30):min(len(analysis_text), e.pos+30)]}'")
-            
+
             # Try to fix the JSON
             try:
                 fixed_text = attempt_json_repair(analysis_text)
@@ -317,10 +385,10 @@ async def analyze_with_openai(book_content: dict) -> dict:
                     return analysis_data
             except:
                 print("Failed to fix JSON, falling back to placeholder")
-            
+
             # Fall back to placeholder
             return await placeholder_analysis(book_content)
-            
+
     except Exception as e:
         print(f"Error in OpenAI book analysis: {str(e)}")
         # Return placeholder analysis on any error
@@ -330,21 +398,21 @@ def validate_analysis_data(analysis_data, book_content):
     """Ensure the analysis data has all required fields and is properly formatted"""
     # Ensure metadata is included
     analysis_data["metadata"] = book_content["metadata"]
-    
+
     # Validate characters
     if "characters" not in analysis_data or not analysis_data["characters"]:
         analysis_data["characters"] = [
-            {"id": "protagonist", "name": "Protagonist", "description": "The main character", 
+            {"id": "protagonist", "name": "Protagonist", "description": "The main character",
              "personality": "Determined and resourceful", "speech_patterns": "Direct and thoughtful",
              "motivations": "To overcome the central challenge", "relationships": "Central to the story",
              "importance": "high"}
         ]
-    
+
     # Ensure each character has all required fields
     for i, char in enumerate(analysis_data["characters"]):
         if "id" not in char:
             char["id"] = f"char_{i}"
-        
+
         # Add missing character fields
         for field in ["name", "description", "personality", "speech_patterns", "motivations", "relationships", "importance"]:
             if field not in char:
@@ -362,19 +430,19 @@ def validate_analysis_data(analysis_data, book_content):
                     char[field] = "Connected to other characters in meaningful ways"
                 elif field == "importance":
                     char[field] = "medium"
-    
+
     # Validate settings
     if "settings" not in analysis_data or not analysis_data["settings"]:
         analysis_data["settings"] = [
             {"id": "setting_1", "name": "Main Setting", "description": "The primary location of the story",
              "atmosphere": "Creates a distinctive mood", "significance": "Central to the plot"}
         ]
-    
+
     # Ensure each setting has all required fields
     for i, setting in enumerate(analysis_data["settings"]):
         if "id" not in setting:
             setting["id"] = f"setting_{i}"
-        
+
         # Add missing setting fields
         for field in ["name", "description", "atmosphere", "significance"]:
             if field not in setting:
@@ -386,7 +454,7 @@ def validate_analysis_data(analysis_data, book_content):
                     setting[field] = "Creates a specific mood and feeling"
                 elif field == "significance":
                     setting[field] = "Plays an important role in the narrative"
-    
+
     # Validate plot structure
     if "plot" not in analysis_data or not isinstance(analysis_data["plot"], dict):
         analysis_data["plot"] = {
@@ -399,28 +467,28 @@ def validate_analysis_data(analysis_data, book_content):
         }
     else:
         plot = analysis_data["plot"]
-        
+
         if "summary" not in plot or not plot["summary"]:
             plot["summary"] = "The story presents an engaging narrative with compelling characters."
-            
+
         if "central_conflict" not in plot or not plot["central_conflict"]:
             plot["central_conflict"] = "A significant challenge that drives the narrative"
-            
+
         if "key_points" not in plot or not isinstance(plot["key_points"], list) or not plot["key_points"]:
             plot["key_points"] = ["Introduction", "Rising Action", "Climax", "Resolution"]
-            
+
         if "branching_points" not in plot or not isinstance(plot["branching_points"], list) or not plot["branching_points"]:
             plot["branching_points"] = [
                 {"description": "A critical decision point", "options": ["Continue as planned", "Take a different approach"]}
             ]
-    
+
     # Validate themes and tone
     if "themes" not in analysis_data or not analysis_data["themes"]:
         analysis_data["themes"] = ["journey", "discovery", "challenge", "growth"]
-        
+
     if "tone" not in analysis_data or not analysis_data["tone"]:
         analysis_data["tone"] = "engaging and thoughtful"
-    
+
     return analysis_data
 
 # Helper function to attempt to repair broken JSON
@@ -428,34 +496,34 @@ def attempt_json_repair(json_text):
     """Attempt to fix common JSON errors"""
     # Try to fix unclosed quotes
     json_text = re.sub(r'([^\\])"([^"]*)$', r'\1"\2"', json_text)
-    
+
     # Try to fix missing closing braces
     open_braces = json_text.count('{')
     close_braces = json_text.count('}')
     if open_braces > close_braces:
         json_text += '}' * (open_braces - close_braces)
-    
+
     # Try to fix missing closing brackets
     open_brackets = json_text.count('[')
     close_brackets = json_text.count(']')
     if open_brackets > close_brackets:
         json_text += ']' * (open_brackets - close_brackets)
-    
+
     return json_text
 
 # Enhanced placeholder analysis for when AI fails
 async def placeholder_analysis(book_content: dict) -> dict:
     """Improved fallback analysis if AI fails"""
-    print("Using placeholder analysis as fallback")
-    
+    log_gemini("Using placeholder analysis as fallback", "WARNING")
+
     # Extract all text into one string for analysis
     full_text = "\n".join([page["content"] for page in book_content["content"]])
-    
+
     # Basic character detection using regex patterns
     characters = []
     potential_names = re.findall(r'"([^"]+)" said|([A-Z][a-z]+) said|\b([A-Z][a-z]+) (?:walked|looked|thought|felt)\b', full_text)
     unique_names = set()
-    
+
     for match in potential_names:
         name = next((n for n in match if n), "")
         name = name.strip()
@@ -473,13 +541,13 @@ async def placeholder_analysis(book_content: dict) -> dict:
                     "relationships": "Connected to other characters in meaningful ways",
                     "importance": "medium"
                 })
-    
+
     # Default characters if none found
     if not characters:
         characters = [
             {
-                "id": "protagonist", 
-                "name": "Protagonist", 
+                "id": "protagonist",
+                "name": "Protagonist",
                 "role": "The main character",
                 "description": "A compelling figure at the center of the story",
                 "personality": "Complex and multifaceted, with strengths and flaws",
@@ -489,8 +557,8 @@ async def placeholder_analysis(book_content: dict) -> dict:
                 "importance": "high"
             },
             {
-                "id": "supporting", 
-                "name": "Supporting Character", 
+                "id": "supporting",
+                "name": "Supporting Character",
                 "role": "An important ally",
                 "description": "A distinctive individual who aids the protagonist",
                 "personality": "Loyal and resourceful",
@@ -500,8 +568,8 @@ async def placeholder_analysis(book_content: dict) -> dict:
                 "importance": "medium"
             },
             {
-                "id": "antagonist", 
-                "name": "Antagonist", 
+                "id": "antagonist",
+                "name": "Antagonist",
                 "role": "Opposes the protagonist",
                 "description": "A formidable presence that creates conflict",
                 "personality": "Complex with understandable motivations",
@@ -511,36 +579,35 @@ async def placeholder_analysis(book_content: dict) -> dict:
                 "importance": "high"
             }
         ]
-    
+
     # Create simple settings
     settings = [
         {
-            "id": "setting_1", 
-            "name": "Primary Location", 
+            "id": "setting_1",
+            "name": "Primary Location",
             "description": "The main setting where key events unfold",
             "atmosphere": "Creates a distinctive mood that enhances the narrative",
             "significance": "Central to the story's development"
         },
         {
-            "id": "setting_2", 
-            "name": "Secondary Location", 
+            "id": "setting_2",
+            "name": "Secondary Location",
             "description": "Another important place in the story",
             "atmosphere": "Provides contrast to the primary setting",
             "significance": "Hosts significant plot developments"
         },
         {
-            "id": "setting_3", 
-            "name": "Tertiary Setting", 
+            "id": "setting_3",
+            "name": "Tertiary Setting",
             "description": "A third location with narrative importance",
             "atmosphere": "Has a unique feel that affects the characters",
             "significance": "Plays a role in advancing the plot"
         }
     ]
-    
+
     # Build the structured output
-    title = book_content["metadata"].get("title", "Unknown")
     author = book_content["metadata"].get("author", "Unknown")
-    
+
     return {
         "metadata": book_content["metadata"],
         "characters": characters,

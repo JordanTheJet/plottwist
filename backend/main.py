@@ -1,12 +1,16 @@
 # File: main.py
 from fastapi import FastAPI, File, Form, UploadFile, BackgroundTasks, HTTPException
 
+# Load environment variables from .env file
+from dotenv import load_dotenv
+load_dotenv()
 
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 import uuid  # Add this import for UUID generation
+import time  # Add import for timestamp in health check
 
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError, ResponseValidationError
@@ -19,14 +23,14 @@ from pdf_processor import process_pdf
 from book_analyzer import analyze_book
 from vn_generator import generate_visual_novel
 
-# Create the FastAPI app - THIS WAS MISSING
+# Create the FastAPI app
 app = FastAPI(title="PlotTwist API", description="API for converting books to visual novels")
 
 # Enable CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-            "http://localhost:8080", 
+            "http://localhost:8080",
             "http://127.0.0.1:8080",
             "https://plottwist.onrender.com"  # Add your frontend URL
         ],
@@ -87,27 +91,27 @@ async def process_book_task(book_id: str, file_path: str):
         books[book_id]["status"] = "processing"
         books[book_id]["progress"] = 10
         print(f"Processing book {book_id}: Extracting PDF content")
-        
+
         # Extract text from PDF
         book_content = await process_pdf(file_path)
         books[book_id]["progress"] = 30
         print(f"Processing book {book_id}: PDF extraction complete, analyzing content")
-        
+
         # Analyze book content
         books[book_id]["status"] = "analyzing"
         book_analysis = await analyze_book(book_content)
         books[book_id]["progress"] = 60
         print(f"Processing book {book_id}: Analysis complete, generating script")
-        
+
         # Generate visual novel script
         books[book_id]["status"] = "generating"
         vn_script = await generate_visual_novel(book_analysis)
         books[book_id]["progress"] = 90
         print(f"Processing book {book_id}: Script generation complete")
-        
+
         # Save the generated script
         script_id = str(uuid.uuid4())
-        
+
         # Format script according to our model structure
         formatted_script = {
             "id": script_id,
@@ -115,7 +119,7 @@ async def process_book_task(book_id: str, file_path: str):
             "title": vn_script.get("title", books[book_id]["title"]),
             "scenes": []
         }
-        
+
         # Ensure scenes have the correct structure
         for scene in vn_script.get("scenes", []):
             formatted_scene = {
@@ -124,25 +128,25 @@ async def process_book_task(book_id: str, file_path: str):
                 "characters": [],
                 "dialogue": []
             }
-            
+
             # Format characters
             for char in scene.get("characters", []):
                 formatted_scene["characters"].append({
                     "id": char["id"],
                     "image": char["image"]
                 })
-            
+
             # Format dialogue
             for dialogue in scene.get("dialogue", []):
                 formatted_dialogue = {
                     "speaker": dialogue["speaker"],
                     "text": dialogue["text"]
                 }
-                
+
                 # Add optional fields if present
                 if "character" in dialogue:
                     formatted_dialogue["character"] = dialogue["character"]
-                
+
                 if "choices" in dialogue:
                     formatted_dialogue["choices"] = []
                     for choice in dialogue["choices"]:
@@ -150,19 +154,19 @@ async def process_book_task(book_id: str, file_path: str):
                             "text": choice["text"],
                             "nextScene": choice["nextScene"]
                         })
-                
+
                 formatted_scene["dialogue"].append(formatted_dialogue)
-            
+
             formatted_script["scenes"].append(formatted_scene)
-        
+
         scripts[script_id] = formatted_script
-        
+
         # Update book status to ready
         books[book_id]["status"] = "ready"
         books[book_id]["progress"] = 100
         books[book_id]["script_id"] = script_id
         print(f"Processing book {book_id}: Complete! Book is ready")
-        
+
     except Exception as e:
         # Handle errors
         books[book_id]["status"] = "error"
@@ -171,10 +175,25 @@ async def process_book_task(book_id: str, file_path: str):
         import traceback
         traceback.print_exc()
 
-@app.get("/")
-async def root():
-    return {"message": "API is running"}
-    
+# API health check endpoint
+@app.get("/api/health")
+async def health_check():
+    """Health check endpoint that returns server information"""
+    server_info = {
+        "status": "online",
+        "server": "local" if os.environ.get('ENVIRONMENT', 'development') == 'development' else "production",
+        "version": "1.0.0",
+        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "debug_mode": os.environ.get('DEBUG', 'False').lower() in ('true', '1', 't'),
+        "api_keys": {
+            "google": bool(os.environ.get('GOOGLE_API_KEY')),
+            "openai": bool(os.environ.get('OPENAI_API_KEY')),
+            "replicate": bool(os.environ.get('REPLICATE_API_TOKEN'))
+        }
+    }
+    print(f"Health check requested - Responding with: {server_info}")
+    return server_info
+
 # Routes
 @app.post("/api/books/upload", response_model=Book)
 async def upload_book(
@@ -186,10 +205,10 @@ async def upload_book(
     try:
         # Print debugging info
         print(f"Received upload request - Title: {title}, Author: {author}, File: {file.filename}")
-        
+
         # Generate unique ID for the book
         book_id = str(uuid.uuid4())
-        
+
         # Save uploaded file
         file_path = f"uploads/{book_id}.pdf"
         try:
@@ -201,7 +220,7 @@ async def upload_book(
         except Exception as e:
             print(f"Error saving file: {str(e)}")
             raise HTTPException(status_code=500, detail=f"Error saving file: {str(e)}")
-        
+
         # Create book record
         book = {
             "id": book_id,
@@ -212,10 +231,10 @@ async def upload_book(
             "progress": 0
         }
         books[book_id] = book
-        
+
         # Start processing in background
         background_tasks.add_task(process_book_task, book_id, file_path)
-        
+
         return book
     except Exception as e:
         print(f"Upload error: {str(e)}")
@@ -236,18 +255,18 @@ async def get_book(book_id: str):
 async def get_script(book_id: str):
     if book_id not in books:
         raise HTTPException(status_code=404, detail="Book not found")
-    
+
     book = books[book_id]
     if book["status"] != "ready":
         raise HTTPException(status_code=400, detail="Script not ready")
-    
+
     script_id = book.get("script_id")
     if not script_id or script_id not in scripts:
         raise HTTPException(status_code=404, detail="Script not found")
-    
+
     # Get the raw script
     raw_script = scripts[script_id]
-    
+
     # Format it according to our model
     formatted_script = {
         "id": raw_script["id"],
@@ -255,7 +274,7 @@ async def get_script(book_id: str):
         "title": raw_script.get("title", book["title"]),
         "scenes": []
     }
-    
+
     # Format each scene to match our Scene model
     for scene in raw_script.get("scenes", []):
         formatted_scene = {
@@ -264,25 +283,25 @@ async def get_script(book_id: str):
             "characters": [],
             "dialogue": []
         }
-        
+
         # Format characters
         for char in scene.get("characters", []):
             formatted_scene["characters"].append({
                 "id": char["id"],
                 "image": char["image"]
             })
-        
+
         # Format dialogue
         for dialogue in scene.get("dialogue", []):
             formatted_dialogue = {
                 "speaker": dialogue["speaker"],
                 "text": dialogue["text"]
             }
-            
+
             # Add optional fields if present
             if "character" in dialogue:
                 formatted_dialogue["character"] = dialogue["character"]
-            
+
             if "choices" in dialogue:
                 formatted_dialogue["choices"] = []
                 for choice in dialogue["choices"]:
@@ -290,11 +309,11 @@ async def get_script(book_id: str):
                         "text": choice["text"],
                         "nextScene": choice["nextScene"]
                     })
-            
+
             formatted_scene["dialogue"].append(formatted_dialogue)
-        
+
         formatted_script["scenes"].append(formatted_scene)
-    
+
     return formatted_script
 
 
@@ -307,7 +326,7 @@ async def validation_exception_handler(request, exc):
             "msg": error["msg"],
             "type": error["type"]
         })
-    
+
     return JSONResponse(
         status_code=422,
         content={
@@ -325,11 +344,11 @@ async def response_validation_exception_handler(request, exc):
             "msg": error["msg"],
             "type": error["type"]
         })
-    
+
     print("Response validation error:")
     for error in error_details:
         print(f"- Path: {'.'.join(str(x) for x in error['loc'])}, Message: {error['msg']}")
-    
+
     return JSONResponse(
         status_code=500,
         content={
@@ -343,7 +362,7 @@ async def generic_exception_handler(request, exc):
     # Print the full traceback for debugging
     print("Unhandled exception:")
     traceback.print_exception(type(exc), exc, exc.__traceback__)
-    
+
     return JSONResponse(
         status_code=500,
         content={
@@ -360,42 +379,59 @@ async def get_scene(scene_id: str, book_id: str):
     """
     if book_id not in books:
         raise HTTPException(status_code=404, detail="Book not found")
-    
+
     book = books[book_id]
-    
+
     # Check if we have a script for this book
     script_id = book.get("script_id")
     if not script_id or script_id not in scripts:
         raise HTTPException(status_code=404, detail="Script not found")
-    
+
     script = scripts[script_id]
-    
+
     # Check if this scene already exists in the script
     scene = next((s for s in script["scenes"] if s["id"] == scene_id), None)
     if scene:
         return scene
-    
+
     # If scene doesn't exist, generate it
     try:
-        # Initialize OpenAI client
-        client = AsyncOpenAI(api_key=os.environ.get("OPENAI_API_KEY", "your-openai-api-key"))
-        
-        # Generate the new scene
-        new_scene = await vn_generator.generate_next_scene(scene_id, client)
-        
+        # Generate the new scene using Gemini
+        new_scene = await vn_generator.generate_next_scene(scene_id)
+
         # Add the scene to the script
         script["scenes"].append(new_scene)
-        
+
         # Update the scene graph in the generator
         vn_generator.update_scene_graph(script)
-        
+
         return new_scene
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to generate scene: {str(e)}")
-        
+
 # Serve static files
 app.mount("/", StaticFiles(directory="static", html=True), name="static")
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    import argparse
+
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description="Run the PlotTwist API server")
+    parser.add_argument("--port", type=int, default=8000, help="Port to run the server on")
+    args = parser.parse_args()
+    
+    # Print environment status for debugging
+    print("\n" + "="*50)
+    print("PLOTTWIST BACKEND SERVER STARTING")
+    print("="*50)
+    print(f"- Running in: {os.environ.get('ENVIRONMENT', 'development')} mode")
+    print(f"- Server URL: http://localhost:{args.port} (if running locally)")
+    print(f"- GOOGLE_API_KEY configured: {'Yes' if os.environ.get('GOOGLE_API_KEY') else 'No'}")
+    print(f"- OPENAI_API_KEY configured: {'Yes' if os.environ.get('OPENAI_API_KEY') else 'No'}")
+    print(f"- DEBUG mode: {'Enabled' if os.environ.get('DEBUG', 'False').lower() in ('true', '1', 't') else 'Disabled'}")
+    print("- Using Gemini exclusively for all AI operations")
+    print("="*50 + "\n")
+
+    print(f"Starting server on port {args.port}")
+    uvicorn.run(app, host="0.0.0.0", port=args.port)
